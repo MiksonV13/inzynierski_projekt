@@ -1,0 +1,14 @@
+{"id": "d489ac48-890e-483f-847a-fefbe087a97a", "name": "wda", "kind": "electricity", "tariff": null, "created_at": "2025-11-11T18:10:58"}
+{"id": "a2e561ef-5906-4fbb-b5c3-089b6993580a", "name": "123", "kind": "water", "tariff": 2.0, "initial_reading": 123123.0, "created_at": "2025-11-11T18:38:09"}
+{"id": "62cba1b9-2584-4633-b3fa-4c2e7783e532", "name": "www", "kind": "gas", "tariff": 2.0, "initial_reading": 233.0, "created_at": "2025-11-11T19:44:44"}
+{"id": "a07af7ce-50ca-4b73-a67d-58158f23adcb", "name": "new", "kind": "electricity", "tariff": 2.0, "initial_reading": 13.0, "created_at": "2025-11-11T19:51:36"}
+{"id": "4cfa0dd9-1902-412b-a402-68555e113295", "name": "123", "kind": "woda", "tariff": 2.0, "initial_reading": 1.0, "created_at": "2025-11-11T20:31:23"}
+{"id": "9d827510-869e-4a1f-954f-0b50dae4139e", "name": "pra", "kind": "prąd", "tariff": 21.0, "initial_reading": 1212.0, "created_at": "2025-11-11T20:31:35"}
+{"id": "413285e0-c9c5-4ced-9778-56d97cb4aaf3", "name": "nowe", "kind": "gaz", "tariff": 12.0, "initial_reading": 123.0, "created_at": "2025-11-14T17:15:40"}
+{"id": "bd8b43fd-ac2f-4a1c-bf9b-6e46b7c10591", "name": "wodaa", "kind": "woda", "tariff": 3.0, "initial_reading": 100.0, "created_at": "2025-11-14T17:40:27"}
+{"id": "c61d113e-c110-45b8-a065-64a9a15a23fe", "name": "gazaa", "kind": "gaz", "tariff": 3.0, "initial_reading": 100.0, "created_at": "2025-11-14T17:44:39"}
+{"id": "ad3382a9-96b4-42ee-bc4c-b345f454c5f9", "name": "kurwa", "kind": "prąd", "tariff": 2.0, "initial_reading": 50.0, "created_at": "2025-11-14T17:54:01"}
+{"id": "9013f55d-f714-4442-8eb8-a75633c5ef61", "name": "sperma", "kind": "woda", "tariff": 2.0, "initial_reading": 10.0, "created_at": "2025-11-14T17:57:28"}
+{"id": "c1c5d799-d4f2-4cae-9b32-cebb2e06c7c1", "name": "shit", "kind": "gaz", "tariff": 2.0, "initial_reading": 10.0, "created_at": "2025-11-14T17:59:40"}
+{"id": "cda849ac-98fa-491a-93fc-fb82bf3210d2", "name": "pierdy", "kind": "gaz", "tariff": 3.0, "initial_reading": 40.0, "created_at": "2025-11-14T18:03:34"}
+{"id": "068d3264-211a-446b-a6b5-17eae738ea8f", "name": "wasd", "kind": "prąd", "tariff": 3.0, "initial_reading": 12.0, "created_at": "2025-11-14T18:29:15"}
