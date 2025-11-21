@@ -1,0 +1,1290 @@
+import os
+import json
+import uuid
+from datetime import datetime
+import tkinter as tk
+from tkinter import ttk, messagebox
+from PIL import Image, ImageDraw, ImageTk, ImageFont
+
+try:
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    from matplotlib.figure import Figure
+
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
+
+
+def get_font(size=10):
+    try:
+        return ImageFont.truetype("arial.ttf", size)
+    except:
+        try:
+            return ImageFont.truetype("C:\\Windows\\Fonts\\arial.ttf", size)
+        except:
+            return ImageFont.load_default()
+
+
+METERS_FILE = "meters.txt"
+READINGS_FILE = "readings.txt"
+
+
+def ensure_files():
+    for p in (METERS_FILE, READINGS_FILE):
+        if not os.path.exists(p):
+            open(p, "w", encoding="utf-8").close()
+
+
+def jsonl_read(path):
+    data = []
+    if not os.path.exists(path):
+        return data
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return data
+
+
+def jsonl_append(path, obj):
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def jsonl_write_all(path, items):
+    with open(path, "w", encoding="utf-8") as f:
+        for it in items:
+            f.write(json.dumps(it, ensure_ascii=False) + "\n")
+
+
+def load_meters(kind=None):
+    meters = [m for m in jsonl_read(METERS_FILE) if not m.get("_deleted")]
+    if kind:
+        meters = [m for m in meters if m.get("kind") == kind]
+    return sorted(meters, key=lambda m: m.get("created_at", ""))
+
+
+def load_readings(meter_id=None):
+    rows = [r for r in jsonl_read(READINGS_FILE) if not r.get("_deleted")]
+    if meter_id is not None:
+        rows = [r for r in rows if r.get("meter_id") == meter_id]
+    return rows
+
+
+def add_meter(name, kind, tariff, initial_reading):
+    obj = {
+        "id": str(uuid.uuid4()),
+        "name": name,
+        "kind": kind,
+        "tariff": float(tariff) if tariff not in (None, "") else None,
+        "initial_reading": float(initial_reading) if initial_reading not in (None, "") else None,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    jsonl_append(METERS_FILE, obj)
+    return obj
+
+
+def update_meter(mid, name, kind, tariff, initial_reading):
+    items = jsonl_read(METERS_FILE)
+    changed = False
+    for it in items:
+        if it.get("id") == mid and not it.get("_deleted"):
+            it["name"] = name
+            it["kind"] = kind
+            it["tariff"] = float(tariff) if tariff not in (None, "") else None
+            it["initial_reading"] = float(initial_reading) if initial_reading not in (None, "") else None
+            it["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            changed = True
+    if changed:
+        jsonl_write_all(METERS_FILE, items)
+    return changed
+
+
+def delete_meter(mid):
+    items = jsonl_read(METERS_FILE)
+    changed = False
+    for it in items:
+        if it.get("id") == mid and not it.get("_deleted"):
+            it["_deleted"] = True
+            changed = True
+    if changed:
+        jsonl_write_all(METERS_FILE, items)
+        # usuń odczyty
+        ritems = jsonl_read(READINGS_FILE)
+        for r in ritems:
+            if r.get("meter_id") == mid and not r.get("_deleted"):
+                r["_deleted"] = True
+        jsonl_write_all(READINGS_FILE, ritems)
+    return changed
+
+
+def add_reading(meter_id, value, ts):
+    obj = {
+        "id": str(uuid.uuid4()),
+        "meter_id": meter_id,
+        "value": float(value),
+        "ts": ts,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    jsonl_append(READINGS_FILE, obj)
+    return obj
+
+
+def delete_reading(rid):
+    items = jsonl_read(READINGS_FILE)
+    changed = False
+    for it in items:
+        if it.get("id") == rid and not it.get("_deleted"):
+            it["_deleted"] = True
+            changed = True
+    if changed:
+        jsonl_write_all(READINGS_FILE, items)
+    return changed
+
+
+def last_two_readings(meter_id):
+    meters = load_meters()
+    meter = next((m for m in meters if m["id"] == meter_id), None)
+
+    rows = load_readings(meter_id)
+    rows.sort(key=lambda r: (r.get("ts", ""), r.get("id", "")))
+
+    all_readings = []
+    if meter and meter.get("initial_reading") is not None:
+        all_readings.append({
+            "value": meter["initial_reading"],
+            "ts": "Odczyt początkowy",
+            "id": "initial"
+        })
+    all_readings.extend(rows)
+
+    if len(all_readings) >= 2:
+        return [all_readings[-1], all_readings[-2]]
+    return all_readings
+
+
+def history_readings(meter_id):
+    rows = load_readings(meter_id)
+    rows.sort(key=lambda r: (r.get("ts", ""), r.get("id", "")))
+    return rows
+
+
+def get_pil_font(size=16):
+    font_paths = [
+        "C:\\Windows\\Fonts\\segoeui.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/System/Library/Fonts/Arial.ttf",
+    ]
+
+    for path in font_paths:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size)
+            except:
+                pass
+
+    return ImageFont.load_default()
+
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Licznik mediów – demo ")
+        self.geometry("1000x700")
+        self.minsize(900, 600)
+        ensure_files()
+
+        self.configure(bg="#E3F2FD")
+
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure('TNotebook', background="#E3F2FD", borderwidth=0)
+        style.configure('TNotebook.Tab', padding=[20, 10], font=('Segoe UI', 10), background="#BBDEFB")
+        style.map('TNotebook.Tab', background=[('selected', '#ffffff')], foreground=[('selected', '#1976D2')])
+        style.configure('TFrame', background="#ffffff")
+        style.configure('TLabel', background="#ffffff", font=('Segoe UI', 10), foreground="#1565C0")
+        style.configure('TButton', font=('Segoe UI', 10, 'bold'), padding=10, background="#1976D2",
+                        foreground="#ffffff")
+        style.map('TButton', background=[('active', '#1565C0')])
+        style.configure('Treeview', font=('Segoe UI', 9), rowheight=28, background="#ffffff", fieldbackground="#ffffff")
+        style.configure('Treeview.Heading', font=('Segoe UI', 10, 'bold'), background="#1976D2", foreground="#ffffff")
+        style.map('Treeview.Heading', background=[('active', '#1565C0')])
+
+        nb = ttk.Notebook(self)
+        nb.pack(fill="both", expand=True, padx=12, pady=12)
+        self.t_add = ttk.Frame(nb)
+        self.t_read = ttk.Frame(nb)
+        self.t_cost = ttk.Frame(nb)
+        self.t_hist = ttk.Frame(nb)
+        self.t_edit = ttk.Frame(nb)
+        self.t_chart = ttk.Frame(nb)
+        nb.add(self.t_add, text="➕ Dodaj licznik")
+        nb.add(self.t_read, text="📝 Dodaj odczyt")
+        nb.add(self.t_chart, text="📊 Zużycie")
+        nb.add(self.t_cost, text="💰 Koszty")
+        nb.add(self.t_hist, text="📚 Historia")
+        nb.add(self.t_edit, text="✏️ Edycja")
+
+        self.build_add()
+        self.build_read()
+        self.build_cost()
+        self.build_hist()
+        self.build_edit()
+        self.build_chart()
+
+    def build_add(self):
+        frm = self.t_add;
+        pad = 16
+
+        r1 = ttk.Frame(frm);
+        r1.pack(fill="x", padx=pad, pady=(pad, 8))
+        ttk.Label(r1, text="Nazwa licznika:", width=25).pack(side="left")
+        self.name_var = tk.StringVar()
+        ttk.Entry(r1, textvariable=self.name_var, width=40, font=('Segoe UI', 10)).pack(side="left", padx=6)
+
+        r2 = ttk.Frame(frm);
+        r2.pack(fill="x", padx=pad, pady=8)
+        ttk.Label(r2, text="Rodzaj:", width=25).pack(side="left")
+        self.kind_var = tk.StringVar(value="prąd")
+        self.kind_combo = ttk.Combobox(r2, textvariable=self.kind_var, state="readonly",
+                                       values=["prąd", "woda", "gaz"], width=20, font=('Segoe UI', 10))
+        self.kind_combo.pack(side="left", padx=6)
+        self.kind_combo.bind("<<ComboboxSelected>>", self.update_tariff_label)
+
+        r3 = ttk.Frame(frm);
+        r3.pack(fill="x", padx=pad, pady=8)
+        self.tariff_label = ttk.Label(r3, text="Taryfa (zł/kWh):", width=25)
+        self.tariff_label.pack(side="left")
+        self.tariff_var = tk.StringVar()
+        ttk.Entry(r3, textvariable=self.tariff_var, width=20, font=('Segoe UI', 10)).pack(side="left", padx=6)
+
+        r4 = ttk.Frame(frm);
+        r4.pack(fill="x", padx=pad, pady=8)
+        ttk.Label(r4, text="Odczyt początkowy:", width=25).pack(side="left")
+        self.initial_reading_var = tk.StringVar()
+        ttk.Entry(r4, textvariable=self.initial_reading_var, width=20, font=('Segoe UI', 10)).pack(side="left", padx=6)
+
+        def on_add():
+            try:
+                name = self.name_var.get().strip()
+                kind = self.kind_var.get()
+                tariff_str = self.tariff_var.get().strip()
+                initial_str = self.initial_reading_var.get().strip()
+                if not name:
+                    messagebox.showerror("Błąd", "Podaj nazwę licznika.")
+                    return
+                add_meter(name, kind, tariff_str, initial_str)
+                messagebox.showinfo("OK", "Dodano licznik.")
+                self.name_var.set("");
+                self.tariff_var.set("")
+                self.initial_reading_var.set("")
+                self.refresh_all()
+            except Exception as e:
+                messagebox.showerror("Błąd", f"Wystąpił błąd: {str(e)}")
+
+        btn_frame = ttk.Frame(frm)
+        btn_frame.pack(padx=pad, pady=(8, pad))
+        ttk.Button(btn_frame, text="➕ Dodaj licznik", command=on_add).pack()
+
+        ttk.Separator(frm, orient="horizontal").pack(fill="x", padx=pad, pady=(pad, 12))
+        ttk.Label(frm, text="Istniejące liczniki:", font=('Segoe UI', 11, 'bold')).pack(anchor="w", padx=pad,
+                                                                                        pady=(0, 8))
+        cols = ("nazwa", "rodzaj", "taryfa", "najnowszy_stan")
+        self.tbl_m = ttk.Treeview(frm, columns=cols, show="headings", height=10)
+        self.tbl_m.heading("nazwa", text="NAZWA")
+        self.tbl_m.heading("rodzaj", text="RODZAJ")
+        self.tbl_m.heading("taryfa", text="TARYFA")
+        self.tbl_m.heading("najnowszy_stan", text="NAJNOWSZY STAN")
+        for c, w in zip(cols, (200, 100, 120, 150)):
+            self.tbl_m.column(c, width=w, anchor="center")
+
+        scrollbar = ttk.Scrollbar(frm, orient="vertical", command=self.tbl_m.yview)
+        self.tbl_m.configure(yscrollcommand=scrollbar.set)
+        self.tbl_m.pack(side="left", fill="both", expand=True, padx=(pad, 0), pady=(0, pad))
+        scrollbar.pack(side="right", fill="y", padx=(0, pad), pady=(0, pad))
+
+        self.refresh_meters_table()
+
+    def update_tariff_label(self, event=None):
+        kind = self.kind_var.get()
+        if kind == "prąd":
+            self.tariff_label.config(text="Taryfa (zł/kWh):")
+        elif kind == "woda":
+            self.tariff_label.config(text="Taryfa (zł/m³):")
+        elif kind == "gaz":
+            self.tariff_label.config(text="Taryfa (zł/m³):")
+        else:
+            self.tariff_label.config(text="Taryfa:")
+
+    def refresh_meters_table(self):
+        for i in self.tbl_m.get_children():
+            self.tbl_m.delete(i)
+        for m in load_meters():
+            hist = history_readings(m["id"])
+            if hist:
+                newest_state = f'{float(hist[-1]["value"]):.3f}'
+            else:
+                initial = m.get("initial_reading")
+                newest_state = f'{float(initial):.3f}' if initial is not None else "-"
+
+            kind = m["kind"]
+            if m.get("tariff") is not None:
+                if kind == "prąd":
+                    tariff_text = f'{float(m["tariff"]):.3f} zł/kWh'
+                elif kind in ("woda", "gaz"):
+                    tariff_text = f'{float(m["tariff"]):.3f} zł/m³'
+                else:
+                    tariff_text = f'{float(m["tariff"]):.3f}'
+            else:
+                tariff_text = ""
+
+            self.tbl_m.insert("", "end",
+                              values=(m["name"],
+                                      m["kind"],
+                                      tariff_text,
+                                      newest_state))
+
+    def build_read(self):
+        frm = self.t_read;
+        pad = 16
+
+        ttk.Label(frm, text="Wybierz licznik:", font=('Segoe UI', 10, 'bold')).pack(anchor="w", padx=pad, pady=(pad, 8))
+        self.read_sel_var = tk.StringVar()
+        self.read_sel = ttk.Combobox(frm, textvariable=self.read_sel_var, state="readonly", width=56,
+                                     font=('Segoe UI', 10))
+        self.read_sel.pack(padx=pad, pady=(0, 12))
+
+        f1 = ttk.Frame(frm);
+        f1.pack(fill="x", padx=pad, pady=8)
+        ttk.Label(f1, text="Stan licznika:", width=30).pack(side="left")
+        self.read_value = tk.StringVar()
+        ttk.Entry(f1, textvariable=self.read_value, width=20, font=('Segoe UI', 10)).pack(side="left", padx=6)
+
+        self.read_ts = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+        btn_frame = ttk.Frame(frm)
+        btn_frame.pack(padx=pad, pady=(12, 8))
+        ttk.Button(btn_frame, text="➕ Zapisz odczyt", command=self.save_reading).pack()
+
+        self.last_info = ttk.Label(frm, text="", font=('Segoe UI', 10, 'italic'), foreground="#555555")
+        self.last_info.pack(anchor="w", padx=pad, pady=(8, 0))
+
+        self.refresh_read_combo()
+
+    def refresh_read_combo(self):
+        meters = load_meters()
+        self._meters_cache_r = meters
+        opts = [f'{m["name"]} ({m["kind"]})' for m in meters]
+        self.read_sel["values"] = opts
+        if opts:
+            self.read_sel.current(len(opts) - 1)
+        self.update_last_info()
+        self.read_sel.bind("<<ComboboxSelected>>", lambda e: self.update_last_info())
+
+    def update_last_info(self):
+        idx = self.read_sel.current()
+        if idx < 0 or not getattr(self, "_meters_cache_r", None):
+            self.last_info.config(text="")
+            return
+        m = self._meters_cache_r[idx]
+        hist = history_readings(m["id"])
+        if hist:
+            last = hist[-1]
+            self.last_info.config(text=f"Ostatni odczyt: {last['value']} z {last['ts']}")
+        else:
+            initial = m.get("initial_reading")
+            if initial is not None:
+                self.last_info.config(text=f"Odczyt początkowy: {initial}")
+            else:
+                self.last_info.config(text="Brak odczytów.")
+
+    def save_reading(self):
+        idx = self.read_sel.current()
+        if idx < 0:
+            messagebox.showerror("Błąd", "Wybierz licznik.")
+            return
+        m = self._meters_cache_r[idx]
+        try:
+            val = float(self.read_value.get().replace(",", "."))
+        except ValueError:
+            messagebox.showerror("Błąd", "Niepoprawna wartość odczytu.")
+            return
+        ts_str = self.read_ts.get().strip()
+        try:
+            _ = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            messagebox.showerror("Błąd", "Nieprawidłowy format daty. Użyj YYYY-MM-DD HH:MM:SS.")
+            return
+
+        hist = history_readings(m["id"])
+        initial = m.get("initial_reading")
+
+        last_value = None
+        if hist:
+            last_value = float(hist[-1]["value"])
+        elif initial is not None:
+            last_value = float(initial)
+
+        if last_value is not None and val < last_value:
+            messagebox.showerror("Błąd", "Nowy odczyt jest mniejszy od poprzedniego.")
+            return
+
+        add_reading(m["id"], val, ts_str)
+        messagebox.showinfo("OK", "Odczyt zapisany.")
+        self.read_value.set("")
+        self.read_ts.set(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        self.refresh_all()
+
+    def build_cost(self):
+        frm = self.t_cost
+        pad = 16
+
+        main_frame = ttk.Frame(frm)
+        main_frame.pack(fill="both", expand=True, padx=pad, pady=pad)
+
+        left_menu = ttk.Frame(main_frame, relief="sunken", borderwidth=1)
+        left_menu.pack(side="left", fill="y", padx=(0, 12))
+
+        ttk.Label(left_menu, text="Wybierz typ:", font=('Segoe UI', 10, 'bold'),
+                  foreground="#1976D2").pack(anchor="w", padx=12, pady=(12, 8))
+
+        self.cost_type_var = tk.StringVar(value="prąd")
+
+        for kind_name, emoji in [("prąd", "⚡"), ("woda", "💧"), ("gaz", "🔥")]:
+            btn = ttk.Button(left_menu, text=f"{emoji} {kind_name.upper()}",
+                             command=lambda k=kind_name: self._switch_cost_type(k))
+            btn.pack(fill="x", padx=8, pady=4)
+
+        right_panel = ttk.Frame(main_frame)
+        right_panel.pack(side="left", fill="both", expand=True)
+
+        info_frame = ttk.Frame(right_panel)
+        info_frame.pack(fill="x", padx=8, pady=(0, 8))
+
+        ttk.Label(info_frame, text="Wybierz licznik:", font=('Segoe UI', 10)).pack(anchor="w", pady=(0, 4))
+
+        self.cost_combo_frame = ttk.Frame(info_frame)
+        self.cost_combo_frame.pack(fill="x")
+
+        self.e_sel_var = tk.StringVar()
+        self.w_sel_var = tk.StringVar()
+        self.g_sel_var = tk.StringVar()
+
+        self.e_sel = ttk.Combobox(self.cost_combo_frame, textvariable=self.e_sel_var, state="readonly",
+                                  width=40, font=('Segoe UI', 10))
+        self.w_sel = ttk.Combobox(self.cost_combo_frame, textvariable=self.w_sel_var, state="readonly",
+                                  width=40, font=('Segoe UI', 10))
+        self.g_sel = ttk.Combobox(self.cost_combo_frame, textvariable=self.g_sel_var, state="readonly",
+                                  width=40, font=('Segoe UI', 10))
+
+        self.e_sel.bind("<<ComboboxSelected>>", lambda e: self.calc_cost_elec())
+        self.w_sel.bind("<<ComboboxSelected>>", lambda e: self.calc_cost_water())
+        self.g_sel.bind("<<ComboboxSelected>>", lambda e: self.calc_cost_gas())
+
+        self.cost_label_elec = ttk.Label(info_frame, text="", font=("Segoe UI", 11, "bold"),
+                                         foreground="#D32F2F")
+        self.cost_label_water = ttk.Label(info_frame, text="", font=("Segoe UI", 11, "bold"),
+                                          foreground="#0277BD")
+        self.cost_label_gas = ttk.Label(info_frame, text="", font=("Segoe UI", 11, "bold"),
+                                        foreground="#F57C00")
+
+        btn_frame = ttk.Frame(right_panel)
+        btn_frame.pack(padx=8, pady=(8, 12), fill="x")
+        ttk.Button(btn_frame, text="📊 Porównanie", command=lambda: self._switch_cost_chart_type("comparison")).pack(
+            side="left", padx=4)
+        ttk.Button(btn_frame, text="📈 Historia", command=lambda: self._switch_cost_chart_type("history")).pack(side="left",
+                                                                                                          padx=4)
+        ttk.Button(btn_frame, text="🔄 Odśwież", command=self.update_cost_chart).pack(side="left", padx=4)
+
+        chart_frame = ttk.LabelFrame(right_panel, text="Wykres kosztów")
+        chart_frame.pack(fill="both", expand=True, padx=8, pady=(0, 0))
+
+        self.cost_chart_e_frame = ttk.Frame(chart_frame)
+        self.cost_chart_w_frame = ttk.Frame(chart_frame)
+        self.cost_chart_g_frame = ttk.Frame(chart_frame)
+
+        self._cost_chart_type = "comparison"
+        self.refresh_e_combo()
+        self.refresh_w_combo()
+        self.refresh_g_combo()
+        self._switch_cost_type("prąd")
+
+    def _switch_cost_type(self, kind):
+        self.e_sel.pack_forget()
+        self.w_sel.pack_forget()
+        self.g_sel.pack_forget()
+        
+        self.cost_chart_e_frame.pack_forget()
+        self.cost_chart_w_frame.pack_forget()
+        self.cost_chart_g_frame.pack_forget()
+        
+        self.cost_type_var.set(kind)
+        
+        if kind == "prąd":
+            self.e_sel.pack(in_=self.cost_combo_frame, fill="x")
+            self.cost_chart_e_frame.pack(fill="both", expand=True)
+            self.calc_cost_elec()
+        elif kind == "woda":
+            self.w_sel.pack(in_=self.cost_combo_frame, fill="x")
+            self.cost_chart_w_frame.pack(fill="both", expand=True)
+            self.calc_cost_water()
+        else:
+            self.g_sel.pack(in_=self.cost_combo_frame, fill="x")
+            self.cost_chart_g_frame.pack(fill="both", expand=True)
+            self.calc_cost_gas()
+
+    def refresh_e_combo(self):
+        elec = load_meters(kind="prąd")
+        self._meters_cache_e = elec
+        opts = [f'{m["name"]}' for m in elec]
+        self.e_sel["values"] = opts
+        if opts:
+            self.e_sel.current(0)
+            self.calc_cost_elec()
+
+    def refresh_w_combo(self):
+        water = load_meters(kind="woda")
+        self._meters_cache_w = water
+        opts = [f'{m["name"]}' for m in water]
+        self.w_sel["values"] = opts
+        if opts:
+            self.w_sel.current(0)
+            self.calc_cost_water()
+
+    def refresh_g_combo(self):
+        gas = load_meters(kind="gaz")
+        self._meters_cache_g = gas
+        opts = [f'{m["name"]}' for m in gas]
+        self.g_sel["values"] = opts
+        if opts:
+            self.g_sel.current(0)
+            self.calc_cost_gas()
+
+    def _switch_cost_chart_type(self, chart_type):
+        self._cost_chart_type = chart_type
+        self.update_cost_chart()
+
+    def update_cost_chart(self):
+        if self.cost_type_var.get() == "prąd":
+            self.calc_cost_elec()
+        elif self.cost_type_var.get() == "woda":
+            self.calc_cost_water()
+        else:
+            self.calc_cost_gas()
+
+    def calc_cost_elec(self):
+        idx = self.e_sel.current()
+        if idx < 0:
+            self._clear_cost_chart("elec")
+            return
+        m = self._meters_cache_e[idx]
+        tariff = float(m.get("tariff") or 0.0)
+        hist = history_readings(m["id"])
+        initial = m.get("initial_reading")
+        total_readings = len(hist) + (1 if initial is not None else 0)
+
+        if total_readings < 2:
+            self._clear_cost_chart("elec")
+            return
+
+        if getattr(self, '_cost_chart_type', 'comparison') == "comparison":
+            curr = float(hist[-1]["value"])
+
+            if len(hist) == 1:
+                prev = float(initial) if initial is not None else curr
+                before_prev = prev
+                diff_curr = curr - prev
+                diff_prev = 0
+            else:
+                prev = float(hist[-2]["value"])
+                before_prev = float(hist[-3]["value"]) if len(hist) >= 3 else (
+                    float(initial) if initial is not None else prev)
+                diff_curr = curr - prev
+                diff_prev = prev - before_prev
+
+            if diff_curr < 0 or diff_prev < 0:
+                self._clear_cost_chart("elec")
+                return
+
+            cost_curr = diff_curr * tariff if tariff else 0
+            cost_prev = diff_prev * tariff if tariff else 0
+            self.after(100, lambda cost_curr=cost_curr, cost_prev=cost_prev: self._draw_cost_chart("elec", cost_curr, cost_prev, "comparison"))
+        else:
+            self.after(100, lambda m=m, hist=hist, initial=initial, tariff=tariff: self._draw_cost_history_chart("elec", m, hist, initial, tariff))
+
+    def calc_cost_water(self):
+        idx = self.w_sel.current()
+        if idx < 0:
+            self._clear_cost_chart("water")
+            return
+        m = self._meters_cache_w[idx]
+        tariff = float(m.get("tariff") or 0.0)
+        hist = history_readings(m["id"])
+        initial = m.get("initial_reading")
+        total_readings = len(hist) + (1 if initial is not None else 0)
+
+        if total_readings < 2:
+            self._clear_cost_chart("water")
+            return
+
+        if getattr(self, '_cost_chart_type', 'comparison') == "comparison":
+            curr = float(hist[-1]["value"])
+
+            if len(hist) == 1:
+                prev = float(initial) if initial is not None else curr
+                before_prev = prev
+                diff_curr = curr - prev
+                diff_prev = 0
+            else:
+                prev = float(hist[-2]["value"])
+                before_prev = float(hist[-3]["value"]) if len(hist) >= 3 else (
+                    float(initial) if initial is not None else prev)
+                diff_curr = curr - prev
+                diff_prev = prev - before_prev
+
+            if diff_curr < 0 or diff_prev < 0:
+                self._clear_cost_chart("water")
+                return
+
+            cost_curr = diff_curr * tariff if tariff else 0
+            cost_prev = diff_prev * tariff if tariff else 0
+            self.after(100, lambda cost_curr=cost_curr, cost_prev=cost_prev: self._draw_cost_chart("water", cost_curr, cost_prev, "comparison"))
+        else:
+            self.after(100, lambda m=m, hist=hist, initial=initial, tariff=tariff: self._draw_cost_history_chart("water", m, hist, initial, tariff))
+
+    def calc_cost_gas(self):
+        idx = self.g_sel.current()
+        if idx < 0:
+            self._clear_cost_chart("gas")
+            return
+        m = self._meters_cache_g[idx]
+        tariff = float(m.get("tariff") or 0.0)
+        hist = history_readings(m["id"])
+        initial = m.get("initial_reading")
+        total_readings = len(hist) + (1 if initial is not None else 0)
+
+        if total_readings < 2:
+            self._clear_cost_chart("gas")
+            return
+
+        if getattr(self, '_cost_chart_type', 'comparison') == "comparison":
+            curr = float(hist[-1]["value"])
+
+            if len(hist) == 1:
+                prev = float(initial) if initial is not None else curr
+                before_prev = prev
+                diff_curr = curr - prev
+                diff_prev = 0
+            else:
+                prev = float(hist[-2]["value"])
+                before_prev = float(hist[-3]["value"]) if len(hist) >= 3 else (
+                    float(initial) if initial is not None else prev)
+                diff_curr = curr - prev
+                diff_prev = prev - before_prev
+
+            if diff_curr < 0 or diff_prev < 0:
+                self._clear_cost_chart("gas")
+                return
+
+            cost_curr = diff_curr * tariff if tariff else 0
+            cost_prev = diff_prev * tariff if tariff else 0
+            self.after(100, lambda cost_curr=cost_curr, cost_prev=cost_prev: self._draw_cost_chart("gas", cost_curr, cost_prev, "comparison"))
+        else:
+            self.after(100, lambda m=m, hist=hist, initial=initial, tariff=tariff: self._draw_cost_history_chart("gas", m, hist, initial, tariff))
+
+    def _clear_cost_chart(self, kind):
+        if kind == "elec":
+            frame = self.cost_chart_e_frame
+        elif kind == "water":
+            frame = self.cost_chart_w_frame
+        else:
+            frame = self.cost_chart_g_frame
+        for widget in frame.winfo_children():
+            widget.destroy()
+
+    def _draw_cost_chart(self, kind, current_cost, previous_cost, chart_type):
+        if kind == "elec":
+            frame = self.cost_chart_e_frame
+        elif kind == "water":
+            frame = self.cost_chart_w_frame
+        else:
+            frame = self.cost_chart_g_frame
+
+        for widget in frame.winfo_children():
+            widget.destroy()
+
+        if not HAS_MATPLOTLIB:
+            ttk.Label(frame, text="Matplotlib nie jest dostępne").pack(padx=8, pady=8)
+            return
+
+        frame_w = frame.winfo_width()
+        frame_h = frame.winfo_height()
+
+        if frame_w < 50:
+            frame_w = 600
+        if frame_h < 50:
+            frame_h = 300
+
+        dpi = 100
+        figsize_w = max(frame_w / dpi * 0.95, 4)
+        figsize_h = max(frame_h / dpi * 0.95, 2.5)
+
+        fig = Figure(figsize=(figsize_w, figsize_h), dpi=dpi)
+        fig.patch.set_facecolor('white')
+
+        ax = fig.add_subplot(111)
+        fig.subplots_adjust(left=0.1, right=0.95, top=0.85, bottom=0.15)
+
+        if previous_cost == 0 or previous_cost < 0.01:
+            labels = ['Bieżący\nokres']
+            costs = [current_cost]
+            colors = ['#FF6B6B']
+            edgecolors = ['#D32F2F']
+            bars = ax.bar([0], costs, color=colors, edgecolor=edgecolors, linewidth=2, width=0.6)
+            ax.set_xlim(-1, 1)
+            ax.set_xticks([0])
+            ax.set_xticklabels(labels)
+        else:
+            labels = ['Poprzedni\nokres', 'Bieżący\nokres']
+            costs = [previous_cost, current_cost]
+            colors = ['#1976D2', '#FF6B6B']
+            edgecolors = ['#1565C0', '#D32F2F']
+            bars = ax.bar(labels, costs, color=colors, edgecolor=edgecolors, linewidth=2, width=0.6)
+
+        ax.set_ylabel('Koszt (zł)', fontsize=11, fontweight='bold')
+        ax.set_title('Porównanie kosztów', fontsize=13, fontweight='bold', pad=20)
+        ax.grid(axis='y', alpha=0.3)
+
+        def format_currency(x, p):
+            if x >= 1e6:
+                return f'{x / 1e6:.1f}M'
+            elif x >= 1e3:
+                return f'{x / 1e3:.0f}k'
+            else:
+                return f'{x:.0f}'
+
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(format_currency))
+
+        max_cost_val = max(costs) if costs else 1
+
+        for bar, cost in zip(bars, costs):
+            if cost > 0.01:
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width() / 2., max_cost_val * 1.05,
+                        f'{cost:.2f} zł',
+                        ha='center', va='bottom', fontsize=11, fontweight='bold', color='#333333')
+
+        canvas = FigureCanvasTkAgg(fig, master=frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+
+    def _draw_cost_history_chart(self, kind, meter, hist, initial, tariff):
+        if kind == "elec":
+            frame = self.cost_chart_e_frame
+        elif kind == "water":
+            frame = self.cost_chart_w_frame
+        else:
+            frame = self.cost_chart_g_frame
+
+        for widget in frame.winfo_children():
+            widget.destroy()
+
+        if not HAS_MATPLOTLIB:
+            ttk.Label(frame, text="Matplotlib nie jest dostępne").pack(padx=8, pady=8)
+            return
+
+        frame_w = frame.winfo_width()
+        frame_h = frame.winfo_height()
+
+        if frame_w < 200:
+        if frame_h < 200:
+            frame_h = 300
+
+        dpi = 100
+        figsize_w = max(frame_w / dpi * 0.95, 4)
+        figsize_h = max(frame_h / dpi * 0.95, 2.5)
+
+        fig = Figure(figsize=(figsize_w, figsize_h), dpi=dpi)
+        fig.patch.set_facecolor('white')
+
+        ax = fig.add_subplot(111)
+
+        costs_data = []
+        labels_data = []
+
+        if initial is not None:
+            costs_data.append(0.0)
+            labels_data.append("Początkowy")
+
+        prev_value = initial if initial is not None else 0
+        for i, r in enumerate(hist[-6:]):
+            curr_value = float(r["value"])
+            period_cost = (curr_value - prev_value) * tariff if tariff else 0
+            if period_cost < 0:
+                period_cost = 0
+            costs_data.append(period_cost)
+            ts_str = r["ts"]
+            if len(ts_str) > 10:
+                ts_str = ts_str[:10]
+            labels_data.append(f"#{i + 1}\n{ts_str}")
+            prev_value = curr_value
+
+        ax.plot(range(len(costs_data)), costs_data, marker='o', color='#1976D2', linewidth=2, markersize=8)
+        ax.fill_between(range(len(costs_data)), costs_data, alpha=0.3, color='#1976D2')
+        ax.set_xticks(range(len(labels_data)))
+        ax.set_xticklabels(labels_data, fontsize=9)
+        ax.set_ylabel('Koszt (zł)', fontsize=11, fontweight='bold')
+        ax.set_title('Historia kosztów (ostatnie 6)', fontsize=13, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+
+        fig.subplots_adjust(left=0.1, right=0.95, top=0.88, bottom=0.12)
+
+        canvas = FigureCanvasTkAgg(fig, master=frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+
+    def build_hist(self):
+        frm = self.t_hist;
+        pad = 16
+        ttk.Label(frm, text="Wybierz licznik:", font=('Segoe UI', 10, 'bold')).pack(anchor="w", padx=pad, pady=(pad, 8))
+        self.h_sel_var = tk.StringVar()
+        self.h_sel = ttk.Combobox(frm, textvariable=self.h_sel_var, state="readonly", width=48, font=('Segoe UI', 10))
+        self.h_sel.pack(padx=pad, pady=(0, 12))
+        cols = ("ts", "value")
+        self.tbl_hist = ttk.Treeview(frm, columns=cols, show="headings", height=16)
+        self.tbl_hist.heading("ts", text="DATA")
+        self.tbl_hist.heading("value", text="STAN")
+        for c, w in zip(cols, (400, 200)):
+            self.tbl_hist.column(c, width=w, anchor="center")
+
+        scrollbar_h = ttk.Scrollbar(frm, orient="vertical", command=self.tbl_hist.yview)
+        self.tbl_hist.configure(yscrollcommand=scrollbar_h.set)
+        self.tbl_hist.pack(side="left", fill="both", expand=True, padx=(pad, 0), pady=(0, 8))
+        scrollbar_h.pack(side="right", fill="y", padx=(0, pad), pady=(0, 8))
+
+        btn_frame = ttk.Frame(frm)
+        btn_frame.pack(pady=(0, pad))
+        ttk.Button(btn_frame, text="🗑️ Usuń zaznaczony odczyt", command=self.remove_reading).pack()
+        self.refresh_h_combo()
+
+    def refresh_h_combo(self):
+        meters = load_meters()
+        self._meters_cache_h = meters
+        opts = [f'{m["name"]} ({m["kind"]})' for m in meters]
+        self.h_sel["values"] = opts
+        if opts:
+            self.h_sel.current(0)
+            self.load_history_table()
+        self.h_sel.bind("<<ComboboxSelected>>", lambda e: self.load_history_table())
+
+    def load_history_table(self):
+        for i in self.tbl_hist.get_children():
+            self.tbl_hist.delete(i)
+        idx = self.h_sel.current()
+        if idx < 0: return
+        m = self._meters_cache_h[idx]
+
+        initial = m.get("initial_reading")
+        if initial is not None:
+            self.tbl_hist.insert("", "end", values=("Odczyt początkowy", f'{float(initial):.3f}'), tags=('initial',))
+
+        for r in history_readings(m["id"]):
+            self.tbl_hist.insert("", "end", values=(r["ts"], f'{float(r["value"]):.3f}'), tags=('reading', r["id"]))
+
+    def remove_reading(self):
+        sel = self.tbl_hist.selection()
+        if not sel:
+            messagebox.showinfo("Info", "Zaznacz wiersz do usunięcia.")
+            return
+        item = self.tbl_hist.item(sel[0])
+        tags = item["tags"]
+
+        if 'initial' in tags:
+            messagebox.showwarning("Uwaga", "Nie można usunąć odczytu początkowego.")
+            return
+
+        rid = tags[1] if len(tags) > 1 else None
+        if rid and messagebox.askyesno("Potwierdzenie", "Usunąć wybrany odczyt?"):
+            delete_reading(rid)
+            self.load_history_table()
+            self.refresh_meters_table()
+
+    def build_edit(self):
+        frm = self.t_edit
+        pad = 16
+
+        ttk.Label(frm, text="Liczniki do edycji:", font=('Segoe UI', 11, 'bold')).pack(anchor="w", padx=pad,
+                                                                                       pady=(pad, 8))
+
+        cols = ("nazwa", "rodzaj", "taryfa")
+        self.tbl_edit = ttk.Treeview(frm, columns=cols, show="headings", height=12)
+        self.tbl_edit.heading("nazwa", text="NAZWA")
+        self.tbl_edit.heading("rodzaj", text="RODZAJ")
+        self.tbl_edit.heading("taryfa", text="TARYFA")
+        for c, w in zip(cols, (200, 100, 200)):
+            self.tbl_edit.column(c, width=w, anchor="center")
+
+        scrollbar = ttk.Scrollbar(frm, orient="vertical", command=self.tbl_edit.yview)
+        self.tbl_edit.configure(yscrollcommand=scrollbar.set)
+        self.tbl_edit.pack(side="left", fill="both", expand=True, padx=(pad, 0), pady=(0, 12))
+        scrollbar.pack(side="right", fill="y", padx=(0, pad), pady=(0, 12))
+
+        btn_frame = ttk.Frame(frm)
+        btn_frame.pack(padx=pad, pady=(0, pad))
+        ttk.Button(btn_frame, text="✏️ Edytuj", command=self.edit_meter).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="🗑️ Usuń", command=self.delete_selected_meter).pack(side="left", padx=4)
+
+        self.refresh_edit_table()
+
+    def refresh_edit_table(self):
+        for i in self.tbl_edit.get_children():
+            self.tbl_edit.delete(i)
+
+        self._meters_cache_edit = []
+        for m in load_meters():
+            self._meters_cache_edit.append(m)
+            kind = m["kind"]
+            if m.get("tariff") is not None:
+                if kind == "prąd":
+                    tariff_text = f'{float(m["tariff"]):.3f} zł/kWh'
+                elif kind in ("woda", "gaz"):
+                    tariff_text = f'{float(m["tariff"]):.3f} zł/m³'
+                else:
+                    tariff_text = f'{float(m["tariff"]):.3f}'
+            else:
+                tariff_text = ""
+
+            self.tbl_edit.insert("", "end", values=(m["name"], m["kind"], tariff_text))
+
+    def edit_meter(self):
+        sel = self.tbl_edit.selection()
+        if not sel:
+            messagebox.showinfo("Info", "Zaznacz licznik do edycji.")
+            return
+
+        item_index = self.tbl_edit.index(sel[0])
+        meter = self._meters_cache_edit[item_index]
+
+        dialog = tk.Toplevel(self)
+        dialog.title("Edytuj licznik")
+        dialog.geometry("400x250")
+        dialog.resizable(False, False)
+
+        ttk.Label(dialog, text="Nazwa:", font=('Segoe UI', 10)).grid(row=0, column=0, padx=12, pady=12, sticky="w")
+        name_var = tk.StringVar(value=meter["name"])
+        name_entry = ttk.Entry(dialog, textvariable=name_var, font=('Segoe UI', 10), width=30)
+        name_entry.grid(row=0, column=1, padx=12, pady=12)
+
+        ttk.Label(dialog, text="Rodzaj:", font=('Segoe UI', 10)).grid(row=1, column=0, padx=12, pady=12, sticky="w")
+        kind_var = tk.StringVar(value=meter["kind"])
+        kind_combo = ttk.Combobox(dialog, textvariable=kind_var, state="readonly",
+                                  values=["prąd", "woda", "gaz"], font=('Segoe UI', 10), width=27)
+        kind_combo.grid(row=1, column=1, padx=12, pady=12)
+
+        ttk.Label(dialog, text="Taryfa:", font=('Segoe UI', 10)).grid(row=2, column=0, padx=12, pady=12, sticky="w")
+        tariff_var = tk.StringVar(value=str(meter.get("tariff") or ""))
+        tariff_entry = ttk.Entry(dialog, textvariable=tariff_var, font=('Segoe UI', 10), width=30)
+        tariff_entry.grid(row=2, column=1, padx=12, pady=12)
+
+        def save():
+            try:
+                name = name_var.get().strip()
+                kind = kind_var.get()
+                tariff_str = tariff_var.get().strip()
+
+                if not name:
+                    messagebox.showerror("Błąd", "Podaj nazwę licznika.")
+                    return
+
+                update_meter(meter["id"], name, kind, tariff_str, meter.get("initial_reading"))
+                messagebox.showinfo("OK", "Licznik zaktualizowany.")
+                dialog.destroy()
+                self.refresh_all()
+            except Exception as e:
+                messagebox.showerror("Błąd", f"Błąd: {str(e)}")
+
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.grid(row=3, column=0, columnspan=2, pady=20)
+        ttk.Button(btn_frame, text="Zapisz", command=save).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="Anuluj", command=dialog.destroy).pack(side="left", padx=4)
+
+    def delete_selected_meter(self):
+        sel = self.tbl_edit.selection()
+        if not sel:
+            messagebox.showinfo("Info", "Zaznacz licznik do usunięcia.")
+            return
+
+        item_index = self.tbl_edit.index(sel[0])
+        meter = self._meters_cache_edit[item_index]
+
+        if messagebox.askyesno("Potwierdzenie",
+                               f"Usunąć licznik '{meter['name']}'?\nWszystkie jego odczyty zostaną usunięte."):
+            delete_meter(meter["id"])
+            self.refresh_all()
+
+    def build_chart(self):
+        frm = self.t_chart
+        pad = 16
+
+        main_frame = ttk.Frame(frm)
+        main_frame.pack(fill="both", expand=True, padx=pad, pady=pad)
+
+        left_menu = ttk.Frame(main_frame, relief="sunken", borderwidth=1)
+        left_menu.pack(side="left", fill="y", padx=(0, 12))
+
+        ttk.Label(left_menu, text="Wybierz typ:", font=('Segoe UI', 10, 'bold'),
+                  foreground="#1976D2").pack(anchor="w", padx=12, pady=(12, 8))
+
+        self.chart_type_var = tk.StringVar(value="prąd")
+
+        for kind_name, emoji in [("prąd", "⚡"), ("woda", "💧"), ("gaz", "🔥")]:
+            btn = ttk.Button(left_menu, text=f"{emoji} {kind_name.upper()}",
+                             command=lambda k=kind_name: self._switch_chart_meter_type(k))
+            btn.pack(fill="x", padx=8, pady=4)
+
+        right_panel = ttk.Frame(main_frame)
+        right_panel.pack(side="left", fill="both", expand=True)
+
+        info_frame = ttk.Frame(right_panel)
+        info_frame.pack(fill="x", padx=8, pady=(0, 12))
+
+        ttk.Label(info_frame, text="Wybierz licznik:", font=('Segoe UI', 10)).pack(anchor="w", pady=(0, 4))
+
+        top_combo_frame = ttk.Frame(info_frame)
+        top_combo_frame.pack(fill="x")
+
+        self.c_sel_var_e = tk.StringVar()
+        self.c_sel_var_w = tk.StringVar()
+        self.c_sel_var_g = tk.StringVar()
+
+        self.c_sel_e = ttk.Combobox(top_combo_frame, textvariable=self.c_sel_var_e, state="readonly",
+                                    width=40, font=('Segoe UI', 10))
+        self.c_sel_w = ttk.Combobox(top_combo_frame, textvariable=self.c_sel_var_w, state="readonly",
+                                    width=40, font=('Segoe UI', 10))
+        self.c_sel_g = ttk.Combobox(top_combo_frame, textvariable=self.c_sel_var_g, state="readonly",
+                                    width=40, font=('Segoe UI', 10))
+
+        self.c_sel_e.bind("<<ComboboxSelected>>", lambda e: self.update_chart())
+        self.c_sel_w.bind("<<ComboboxSelected>>", lambda e: self.update_chart())
+        self.c_sel_g.bind("<<ComboboxSelected>>", lambda e: self.update_chart())
+
+        btn_frame = ttk.Frame(right_panel)
+        btn_frame.pack(padx=8, pady=(8, 12), fill="x")
+        ttk.Button(btn_frame, text="📊 Porównanie", command=lambda: self._switch_chart_type("comparison")).pack(
+            side="left", padx=4)
+        ttk.Button(btn_frame, text="📈 Historia", command=lambda: self._switch_chart_type("history")).pack(side="left",
+                                                                                                          padx=4)
+        ttk.Button(btn_frame, text="🔄 Odśwież", command=self.update_chart).pack(side="left", padx=4)
+
+        chart_frame_label = ttk.LabelFrame(right_panel, text="Wykres zużycia")
+        chart_frame_label.pack(fill="both", expand=True, padx=8, pady=(0, 0))
+
+        self.chart_e_frame = ttk.Frame(chart_frame_label)
+        self.chart_w_frame = ttk.Frame(chart_frame_label)
+        self.chart_g_frame = ttk.Frame(chart_frame_label)
+
+        self._chart_type = "comparison"
+        self.refresh_chart_e_combo()
+        self.refresh_chart_w_combo()
+        self.refresh_chart_g_combo()
+        self._switch_chart_meter_type("prąd")
+
+    def _switch_chart_type(self, chart_type):
+        self._chart_type = chart_type
+        self.update_chart()
+
+    def _switch_chart_meter_type(self, kind):
+        for frame in [self.chart_e_frame, self.chart_w_frame, self.chart_g_frame]:
+            frame.pack_forget()
+        for combo in [self.c_sel_e, self.c_sel_w, self.c_sel_g]:
+            combo.pack_forget()
+
+        self.chart_type_var.set(kind)
+
+        if kind == "prąd":
+            self.c_sel_e.pack(fill="x")
+            self.chart_e_frame.pack(fill="both", expand=True)
+            self.update_chart()
+        elif kind == "woda":
+            self.c_sel_w.pack(fill="x")
+            self.chart_w_frame.pack(fill="both", expand=True)
+            self.update_chart()
+        else:
+            self.c_sel_g.pack(fill="x")
+            self.chart_g_frame.pack(fill="both", expand=True)
+            self.update_chart()
+
+    def refresh_chart_e_combo(self):
+        elec = load_meters(kind="prąd")
+        self._meters_cache_e_chart = elec
+        opts = [f'{m["name"]}' for m in elec]
+        self.c_sel_e["values"] = opts
+        if opts:
+            self.c_sel_e.current(len(opts) - 1)
+
+    def refresh_chart_w_combo(self):
+        water = load_meters(kind="woda")
+        self._meters_cache_w_chart = water
+        opts = [f'{m["name"]}' for m in water]
+        self.c_sel_w["values"] = opts
+        if opts:
+            self.c_sel_w.current(len(opts) - 1)
+
+    def refresh_chart_g_combo(self):
+        gas = load_meters(kind="gaz")
+        self._meters_cache_g_chart = gas
+        opts = [f'{m["name"]}' for m in gas]
+        self.c_sel_g["values"] = opts
+        if opts:
+            self.c_sel_g.current(len(opts) - 1)
+
+    def update_chart(self):
+        kind = self.chart_type_var.get()
+        if kind == "prąd":
+            idx = self.c_sel_e.current()
+            cache = getattr(self, "_meters_cache_e_chart", [])
+            frame = self.chart_e_frame
+        elif kind == "woda":
+            idx = self.c_sel_w.current()
+            cache = getattr(self, "_meters_cache_w_chart", [])
+            frame = self.chart_w_frame
+        else:
+            idx = self.c_sel_g.current()
+            cache = getattr(self, "_meters_cache_g_chart", [])
+            frame = self.chart_g_frame
+
+        if idx < 0 or not cache:
+            return
+
+        m = cache[idx]
+
+        for widget in frame.winfo_children():
+            widget.destroy()
+
+        hist = history_readings(m["id"])
+        initial = m.get("initial_reading")
+        total_readings = len(hist) + (1 if initial is not None else 0)
+
+        if total_readings < 2:
+            ttk.Label(frame, text="Potrzebne są co najmniej 2 odczyty do wyświetlenia wykresu.",
+                      font=('Segoe UI', 10)).pack(padx=16, pady=16)
+            return
+
+        self.after(100, lambda: self._draw_chart_matplotlib(m, hist, frame))
+
+    def _draw_chart_matplotlib(self, m, hist, frame):
+        frame_w = frame.winfo_width()
+        frame_h = frame.winfo_height()
+
+        if frame_w < 200:
+            frame_w = 1000
+        if frame_h < 200:
+            frame_h = 500
+
+        dpi = 100
+        figsize_w = max(frame_w / dpi * 0.95, 6)
+        figsize_h = max(frame_h / dpi * 0.95, 4)
+
+        fig = Figure(figsize=(figsize_w, figsize_h), dpi=dpi)
+        fig.patch.set_facecolor('white')
+
+        ax = fig.add_subplot(111)
+
+        readings_data = []
+        labels_data = []
+
+        initial = m.get("initial_reading")
+        if initial is not None:
+            readings_data.append(float(initial))
+            labels_data.append("Początkowy")
+
+        for i, r in enumerate(hist[-6:]):
+            readings_data.append(float(r["value"]))
+            ts_str = r["ts"]
+            if len(ts_str) > 10:
+                ts_str = ts_str[:10]
+            labels_data.append(f"#{i + 1}\n{ts_str}")
+
+        if self._chart_type == "comparison":
+            colors_comparison = ['#1976D2', '#FF6B6B']
+            if len(hist) >= 1:
+                curr = float(hist[-1]["value"])
+
+                if len(hist) == 1:
+                    initial_val = float(initial) if initial is not None else 0
+                    bar_labels = ['Początkowy\nodczyt', 'Aktualny\nodczyt']
+                    bar_values = [initial_val, curr]
+                else:
+                    prev = float(hist[-2]["value"])
+                    initial_val = prev
+                    bar_labels = ['Poprzedni\nodczyt', 'Aktualny\nodczyt']
+                    bar_values = [prev, curr]
+
+                bars = ax.bar(bar_labels, bar_values, color=colors_comparison, edgecolor=['#1565C0', '#D32F2F'],
+                              linewidth=2)
+                ax.set_ylabel('Wartość [' + self._get_unit(m["kind"]) + ']', fontsize=11, fontweight='bold')
+                ax.set_title('Porównanie zużycia', fontsize=13, fontweight='bold', pad=20)
+                ax.grid(axis='y', alpha=0.3)
+
+                max_val = max(bar_values)
+                for i, (bar, v) in enumerate(zip(bars, bar_values)):
+                    ax.text(bar.get_x() + bar.get_width() / 2., max_val * 1.05, f'{v:.3f}', ha='center', va='bottom',
+                            fontsize=11, fontweight='bold')
+        else:
+            ax.plot(range(len(readings_data)), readings_data, marker='o', color='#1976D2', linewidth=2, markersize=8)
+            ax.fill_between(range(len(readings_data)), readings_data, alpha=0.3, color='#1976D2')
+            ax.set_xticks(range(len(labels_data)))
+            ax.set_xticklabels(labels_data, fontsize=9)
+            ax.set_ylabel('Wartość [' + self._get_unit(m["kind"]) + ']', fontsize=11, fontweight='bold')
+            ax.set_title('Historia odczytów (ostatnie 6)', fontsize=13, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+
+        fig.subplots_adjust(left=0.1, right=0.95, top=0.88, bottom=0.12)
+
+        canvas = FigureCanvasTkAgg(fig, master=frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+
+    def _get_unit(self, kind):
+        units = {
+            "prąd": "kWh",
+            "woda": "m³",
+            "gaz": "m³"
+        }
+        return units.get(kind, "szt.")
+
+    def refresh_all(self):
+        self.refresh_meters_table()
+        self.refresh_read_combo()
+        self.refresh_e_combo()
+        self.refresh_w_combo()
+        self.refresh_g_combo()
+        self.refresh_h_combo()
+        self.refresh_edit_table()
+        self.refresh_chart_e_combo()
+        self.refresh_chart_w_combo()
+        self.refresh_chart_g_combo()
+
+        if self.cost_type_var.get() == "prąd":
+            self.calc_cost_elec()
+        elif self.cost_type_var.get() == "woda":
+            self.calc_cost_water()
+        else:
+            self.calc_cost_gas()
+
+        self.update_chart()
+
+
+if __name__ == "__main__":
+    app = App()
+    app.mainloop()
+
+
+            frame_w = 600
