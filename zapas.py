@@ -1,151 +1,236 @@
 import os
-import json
 import uuid
 from datetime import datetime
+from decimal import Decimal
 import tkinter as tk
 from tkinter import ttk, messagebox
-from PIL import Image, ImageDraw, ImageTk, ImageFont
+import requests
+import boto3
+import time
+from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 
-try:
-    import matplotlib.pyplot as plt
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-    from matplotlib.figure import Figure
-
-    HAS_MATPLOTLIB = True
-except ImportError:
-    HAS_MATPLOTLIB = False
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
 
 
-def get_font(size=10):
-    try:
-        return ImageFont.truetype("arial.ttf", size)
-    except:
-        try:
-            return ImageFont.truetype("C:\\Windows\\Fonts\\arial.ttf", size)
-        except:
-            return ImageFont.load_default()
+CURRENT_USER = None
+
+ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID", "AKIA3HGZKODJZMKBTBXX")
+SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "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")
+REGION = os.getenv("AWS_REGION", "eu-north-1")
+
+dynamo = boto3.client(
+    "dynamodb",
+    aws_access_key_id=ACCESS_KEY,
+    aws_secret_access_key=SECRET_KEY,
+    region_name=REGION
+)
 
 
-METERS_FILE = "meters.txt"
-READINGS_FILE = "readings.txt"
+def deserialize_item(item):
+    deserializer = TypeDeserializer()
+    return {k: deserializer.deserialize(v) for k, v in item.items()}
+
+
+def serialize_item(item):
+    serializer = TypeSerializer()
+    return {k: serializer.serialize(v) for k, v in item.items()}
 
 
 def ensure_files():
-    for p in (METERS_FILE, READINGS_FILE):
-        if not os.path.exists(p):
-            open(p, "w", encoding="utf-8").close()
-
-
-def jsonl_read(path):
-    data = []
-    if not os.path.exists(path):
-        return data
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                data.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return data
-
-
-def jsonl_append(path, obj):
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-
-
-def jsonl_write_all(path, items):
-    with open(path, "w", encoding="utf-8") as f:
-        for it in items:
-            f.write(json.dumps(it, ensure_ascii=False) + "\n")
+    pass
 
 
 def load_meters(kind=None):
-    meters = [m for m in jsonl_read(METERS_FILE) if not m.get("_deleted")]
-    if kind:
-        meters = [m for m in meters if m.get("kind") == kind]
-    return sorted(meters, key=lambda m: m.get("created_at", ""))
+    if not CURRENT_USER:
+        return []
+    try:
+        resp = dynamo.query(
+            TableName="Meters",
+            KeyConditionExpression="userEmail = :email",
+            ExpressionAttributeValues={":email": {"S": CURRENT_USER}}
+        )
+        meters = [deserialize_item(m) for m in resp.get("Items", [])]
+        if kind:
+            meters = [m for m in meters if m.get("type") == kind]
+        for m in meters:
+            m["id"] = m.get("meterId")
+            m["kind"] = m.get("type")
+            m["created_at"] = m.get("createdAt")
+            m["initial_reading"] = m.get("initialReading")
+            m["updated_at"] = m.get("updatedAt")
+        return sorted(meters, key=lambda m: m.get("created_at", 0))
+    except Exception as e:
+        print(f"Error loading meters: {e}")
+        return []
 
 
 def load_readings(meter_id=None):
-    rows = [r for r in jsonl_read(READINGS_FILE) if not r.get("_deleted")]
-    if meter_id is not None:
-        rows = [r for r in rows if r.get("meter_id") == meter_id]
-    return rows
+    if not CURRENT_USER:
+        return []
+    try:
+        resp = dynamo.query(
+            TableName="Readings",
+            KeyConditionExpression="userEmail = :email",
+            ExpressionAttributeValues={":email": {"S": CURRENT_USER}}
+        )
+        rows = [deserialize_item(r) for r in resp.get("Items", [])]
+        if meter_id is not None:
+            rows = [r for r in rows if r.get("meterId") == meter_id]
+        for r in rows:
+            r["id"] = r.get("readingId")
+            r["meter_id"] = r.get("meterId")
+            r["ts"] = r.get("date")
+        return rows
+    except Exception as e:
+        print(f"Error loading readings: {e}")
+        return []
 
 
 def add_meter(name, kind, tariff, initial_reading):
-    obj = {
-        "id": str(uuid.uuid4()),
-        "name": name,
-        "kind": kind,
-        "tariff": float(tariff) if tariff not in (None, "") else None,
-        "initial_reading": float(initial_reading) if initial_reading not in (None, "") else None,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-    }
-    jsonl_append(METERS_FILE, obj)
-    return obj
+    if not CURRENT_USER:
+        raise Exception("Not logged in")
+    try:
+        meter_id = str(uuid.uuid4())
+        tariff_val = None
+        initial_val = None
+        
+        if tariff not in (None, ""):
+            try:
+                tariff_val = Decimal(str(tariff))
+            except:
+                raise Exception("Proszę wpisać liczbę")
+        if initial_reading not in (None, ""):
+            try:
+                initial_val = Decimal(str(initial_reading))
+            except:
+                raise Exception("Proszę wpisać liczbę")
+        
+        item = {
+            "userEmail": CURRENT_USER,
+            "meterId": meter_id,
+            "name": name,
+            "type": kind,
+            "tariff": tariff_val,
+            "initialReading": initial_val,
+            "createdAt": int(time.time())
+        }
+        dynamo.put_item(TableName="Meters", Item=serialize_item(item))
+        item["id"] = meter_id
+        item["kind"] = kind
+        item["created_at"] = item["createdAt"]
+        return item
+    except Exception as e:
+        raise Exception(f"Failed to add meter: {e}")
 
 
 def update_meter(mid, name, kind, tariff, initial_reading):
-    items = jsonl_read(METERS_FILE)
-    changed = False
-    for it in items:
-        if it.get("id") == mid and not it.get("_deleted"):
-            it["name"] = name
-            it["kind"] = kind
-            it["tariff"] = float(tariff) if tariff not in (None, "") else None
-            it["initial_reading"] = float(initial_reading) if initial_reading not in (None, "") else None
-            it["updated_at"] = datetime.now().isoformat(timespec="seconds")
-            changed = True
-    if changed:
-        jsonl_write_all(METERS_FILE, items)
-    return changed
+    if not CURRENT_USER:
+        return False
+    try:
+        try:
+            tariff_val = None if tariff in (None, "") else Decimal(str(tariff))
+        except:
+            raise Exception("Proszę wpisać liczbę")
+        try:
+            initial_val = None if initial_reading in (None, "") else Decimal(str(initial_reading))
+        except:
+            raise Exception("Proszę wpisać liczbę")
+        
+        update_expr = []
+        expr_values = {}
+        expr_names = {}
+        
+        updates = {
+            "name": name,
+            "type": kind,
+            "tariff": tariff_val,
+            "initialReading": initial_val
+        }
+        
+        for k, v in updates.items():
+            update_expr.append(f"#{k} = :{k}")
+            expr_names[f"#{k}"] = k
+            expr_values[f":{k}"] = serialize_item({k: v})[k]
+        
+        dynamo.update_item(
+            TableName="Meters",
+            Key=serialize_item({"userEmail": CURRENT_USER, "meterId": mid}),
+            UpdateExpression="SET " + ", ".join(update_expr),
+            ExpressionAttributeNames=expr_names,
+            ExpressionAttributeValues=expr_values
+        )
+        return True
+    except Exception as e:
+        raise Exception(f"Error updating meter: {e}")
 
 
 def delete_meter(mid):
-    items = jsonl_read(METERS_FILE)
-    changed = False
-    for it in items:
-        if it.get("id") == mid and not it.get("_deleted"):
-            it["_deleted"] = True
-            changed = True
-    if changed:
-        jsonl_write_all(METERS_FILE, items)
-        # usuń odczyty
-        ritems = jsonl_read(READINGS_FILE)
-        for r in ritems:
-            if r.get("meter_id") == mid and not r.get("_deleted"):
-                r["_deleted"] = True
-        jsonl_write_all(READINGS_FILE, ritems)
-    return changed
+    if not CURRENT_USER:
+        return False
+    try:
+        dynamo.delete_item(
+            TableName="Meters",
+            Key=serialize_item({"userEmail": CURRENT_USER, "meterId": mid})
+        )
+        resp = dynamo.query(
+            TableName="Readings",
+            KeyConditionExpression="userEmail = :email",
+            ExpressionAttributeValues={":email": {"S": CURRENT_USER}}
+        )
+        for r in resp.get("Items", []):
+            r_deser = deserialize_item(r)
+            if r_deser.get("meterId") == mid:
+                dynamo.delete_item(
+                    TableName="Readings",
+                    Key=serialize_item({"userEmail": CURRENT_USER, "readingId": r_deser.get("readingId")})
+                )
+        return True
+    except Exception as e:
+        print(f"Error deleting meter: {e}")
+        return False
 
 
 def add_reading(meter_id, value, ts):
-    obj = {
-        "id": str(uuid.uuid4()),
-        "meter_id": meter_id,
-        "value": float(value),
-        "ts": ts,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-    }
-    jsonl_append(READINGS_FILE, obj)
-    return obj
+    if not CURRENT_USER:
+        raise Exception("Not logged in")
+    try:
+        reading_id = str(uuid.uuid4())
+        try:
+            value_decimal = Decimal(str(value))
+        except:
+            raise Exception("Proszę wpisać liczbę")
+        item = {
+            "userEmail": CURRENT_USER,
+            "readingId": reading_id,
+            "meterId": meter_id,
+            "value": value_decimal,
+            "date": ts,
+            "createdAt": int(time.time())
+        }
+        dynamo.put_item(TableName="Readings", Item=serialize_item(item))
+        item["id"] = reading_id
+        item["meter_id"] = meter_id
+        item["ts"] = ts
+        return item
+    except Exception as e:
+        raise Exception(f"Failed to add reading: {e}")
 
 
 def delete_reading(rid):
-    items = jsonl_read(READINGS_FILE)
-    changed = False
-    for it in items:
-        if it.get("id") == rid and not it.get("_deleted"):
-            it["_deleted"] = True
-            changed = True
-    if changed:
-        jsonl_write_all(READINGS_FILE, items)
-    return changed
+    if not CURRENT_USER:
+        return False
+    try:
+        dynamo.delete_item(
+            TableName="Readings",
+            Key=serialize_item({"userEmail": CURRENT_USER, "readingId": rid})
+        )
+        return True
+    except Exception as e:
+        print(f"Error deleting reading: {e}")
+        return False
+
 
 
 def last_two_readings(meter_id):
@@ -175,36 +260,25 @@ def history_readings(meter_id):
     return rows
 
 
-def get_pil_font(size=16):
-    font_paths = [
-        "C:\\Windows\\Fonts\\segoeui.ttf",
-        "C:\\Windows\\Fonts\\arial.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/System/Library/Fonts/Arial.ttf",
-    ]
-
-    for path in font_paths:
-        if os.path.exists(path):
-            try:
-                return ImageFont.truetype(path, size)
-            except:
-                pass
-
-    return ImageFont.load_default()
+BASE_URL = "https://2wc2plq72h.execute-api.eu-north-1.amazonaws.com/default"
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Licznik mediów – demo ")
-        self.geometry("1000x700")
-        self.minsize(900, 600)
+        self.title("Licznik mediów")
+        self.geometry("1200x800")
+        self.minsize(1000, 650)
+        self.token = None
+        self.current_user = None
         ensure_files()
 
         self.configure(bg="#E3F2FD")
-
+        
         style = ttk.Style()
         style.theme_use('clam')
+        style.configure('LoginFrame.TFrame', background="#E3F2FD")
+        style.configure('LoginLabel.TLabel', background="#E3F2FD", font=('Segoe UI', 10), foreground="#1565C0")
         style.configure('TNotebook', background="#E3F2FD", borderwidth=0)
         style.configure('TNotebook.Tab', padding=[20, 10], font=('Segoe UI', 10), background="#BBDEFB")
         style.map('TNotebook.Tab', background=[('selected', '#ffffff')], foreground=[('selected', '#1976D2')])
@@ -216,8 +290,146 @@ class App(tk.Tk):
         style.configure('Treeview', font=('Segoe UI', 9), rowheight=28, background="#ffffff", fieldbackground="#ffffff")
         style.configure('Treeview.Heading', font=('Segoe UI', 10, 'bold'), background="#1976D2", foreground="#ffffff")
         style.map('Treeview.Heading', background=[('active', '#1565C0')])
-
-        nb = ttk.Notebook(self)
+        
+        self.login_frame = None
+        self.app_frame = None
+        self.show_login()
+    
+    def _is_valid_number(self, value):
+        try:
+            float(value.replace(",", "."))
+            return True
+        except ValueError:
+            return False
+    
+    def show_login(self):
+        if self.app_frame:
+            self.app_frame.pack_forget()
+        
+        if self.login_frame:
+            self.login_frame.pack(fill="both", expand=True)
+            return
+        
+        self.geometry("400x300")
+        
+        self.login_frame = ttk.Frame(self, style='LoginFrame.TFrame')
+        self.login_frame.pack(fill="both", expand=True)
+        
+        outer_frame = ttk.Frame(self.login_frame, style='LoginFrame.TFrame')
+        outer_frame.pack(fill="both", expand=True, padx=100, pady=20)
+        
+        center_frame = ttk.Frame(outer_frame, style='LoginFrame.TFrame')
+        center_frame.pack(fill="both", expand=True)
+        
+        title = ttk.Label(center_frame, text="Licznik mediów", font=('Segoe UI', 14, 'bold'), foreground="#1976D2", style='LoginLabel.TLabel')
+        title.pack(pady=(40, 20))
+        
+        ttk.Label(center_frame, text="Login:", font=('Segoe UI', 9), style='LoginLabel.TLabel').pack(anchor="w", pady=(0, 2))
+        self.email_var = tk.StringVar()
+        ttk.Entry(center_frame, textvariable=self.email_var, width=32, font=('Segoe UI', 10)).pack(fill="x", pady=(0, 8))
+        
+        ttk.Label(center_frame, text="Hasło:", font=('Segoe UI', 9), style='LoginLabel.TLabel').pack(anchor="w", pady=(0, 2))
+        self.password_var = tk.StringVar()
+        ttk.Entry(center_frame, textvariable=self.password_var, width=32, show="*", font=('Segoe UI', 10)).pack(fill="x", pady=(0, 14))
+        
+        button_frame = ttk.Frame(center_frame, style='LoginFrame.TFrame')
+        button_frame.pack(fill="x", pady=(0, 8))
+        ttk.Button(button_frame, text="Zaloguj", command=self.do_login).pack(side="left", padx=(0, 6), expand=True, fill="x")
+        ttk.Button(button_frame, text="Zarejestruj", command=self.do_register).pack(side="left", expand=True, fill="x")
+        
+        self.status_label = ttk.Label(center_frame, text="", font=('Segoe UI', 8), foreground="#D32F2F", style='LoginLabel.TLabel')
+        self.status_label.pack(pady=(0, 0))
+    
+    def do_login(self):
+        global CURRENT_USER
+        email = self.email_var.get().strip()
+        password = self.password_var.get().strip()
+        
+        if not email or not password:
+            self.status_label.config(text="Podaj login i hasło", foreground="#D32F2F")
+            return
+        
+        self.status_label.config(text="Logowanie...", foreground="#1976D2")
+        self.update()
+        
+        try:
+            response = requests.post(f"{BASE_URL}/login", json={"email": email, "password": password}, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                self.token = data.get("token")
+                self.current_user = email
+                CURRENT_USER = email
+                ensure_files()
+                self.status_label.config(text="Zalogowano!", foreground="#388E3C")
+                self.after(500, self.show_app)
+            else:
+                self.status_label.config(text="Niepoprawne dane", foreground="#D32F2F")
+        except Exception as e:
+            self.status_label.config(text=f"Błąd: {str(e)[:30]}", foreground="#D32F2F")
+    
+    def do_register(self):
+        global CURRENT_USER
+        email = self.email_var.get().strip()
+        password = self.password_var.get().strip()
+        
+        if not email or not password:
+            self.status_label.config(text="Podaj login i hasło", foreground="#D32F2F")
+            return
+        
+        if len(password) < 6:
+            self.status_label.config(text="Hasło musi mieć min. 6 znaków", foreground="#D32F2F")
+            return
+        
+        self.status_label.config(text="Rejestracja...", foreground="#1976D2")
+        self.update()
+        
+        try:
+            response = requests.post(f"{BASE_URL}/register", json={"email": email, "password": password}, timeout=5)
+            if 200 <= response.status_code < 300:
+                response2 = requests.post(f"{BASE_URL}/login", json={"email": email, "password": password}, timeout=5)
+                if response2.status_code == 200:
+                    data = response2.json()
+                    self.token = data.get("token")
+                    self.current_user = email
+                    CURRENT_USER = email
+                    ensure_files()
+                    self.status_label.config(text="User registered successfully", foreground="#388E3C")
+                    self.after(500, self.show_app)
+                else:
+                    self.status_label.config(text="Błąd logowania", foreground="#D32F2F")
+            else:
+                try:
+                    resp_text = response.json().get("message", response.text)
+                except:
+                    resp_text = response.text
+                
+                if "exists" in resp_text.lower() or response.status_code == 409:
+                    self.status_label.config(text="Konto istnieje. Zaloguj się.", foreground="#F57C00")
+                else:
+                    self.status_label.config(text=f"Błąd: {resp_text[:30]}", foreground="#D32F2F")
+        except Exception as e:
+            self.status_label.config(text=f"Błąd: {str(e)[:30]}", foreground="#D32F2F")
+    
+    def show_app(self):
+        if self.login_frame:
+            self.login_frame.pack_forget()
+        
+        self.geometry("1200x800")
+        
+        if self.app_frame:
+            self.app_frame.pack(fill="both", expand=True)
+            self.refresh_meters_table()
+            self.refresh_read_combo()
+            self.refresh_e_combo()
+            self.refresh_w_combo()
+            self.refresh_g_combo()
+            self.refresh_edit_table()
+            return
+        
+        self.app_frame = ttk.Frame(self)
+        self.app_frame.pack(fill="both", expand=True)
+        
+        nb = ttk.Notebook(self.app_frame)
         nb.pack(fill="both", expand=True, padx=12, pady=12)
         self.t_add = ttk.Frame(nb)
         self.t_read = ttk.Frame(nb)
@@ -238,6 +450,30 @@ class App(tk.Tk):
         self.build_hist()
         self.build_edit()
         self.build_chart()
+        
+        bottom_bar = ttk.Frame(self.app_frame)
+        bottom_bar.pack(fill="x", padx=12, pady=(0, 12))
+        
+        user_label = ttk.Label(bottom_bar, text=f"Zalogowany: {self.current_user}", font=('Segoe UI', 10, 'bold'), foreground="#1976D2")
+        user_label.pack(side="left", expand=True)
+        
+        ttk.Button(bottom_bar, text="🚪 Wyloguj", command=self.do_logout).pack(side="right")
+    
+    def do_logout(self):
+        global CURRENT_USER
+        if messagebox.askyesno("Wylogowanie", "Na pewno chcesz się wylogować?"):
+            self.token = None
+            self.current_user = None
+            CURRENT_USER = None
+            self.email_var.set("")
+            self.password_var.set("")
+            self.status_label.config(text="")
+            if self.app_frame:
+                self.app_frame.pack_forget()
+                self.app_frame.destroy()
+                self.app_frame = None
+            self.geometry("400x300")
+            self.show_login()
 
     def build_add(self):
         frm = self.t_add;
@@ -280,6 +516,21 @@ class App(tk.Tk):
                 if not name:
                     messagebox.showerror("Błąd", "Podaj nazwę licznika.")
                     return
+                
+                errors = []
+                if tariff_str and not self._is_valid_number(tariff_str):
+                    errors.append("taryfa")
+                if initial_str and not self._is_valid_number(initial_str):
+                    errors.append("odczyt początkowy")
+                
+                if errors:
+                    if len(errors) == 1:
+                        msg = f"Proszę wpisać liczbę w {errors[0]}"
+                    else:
+                        msg = f"Proszę wpisać liczby w {' oraz '.join(errors)}"
+                    messagebox.showerror("Błąd", msg)
+                    return
+                
                 add_meter(name, kind, tariff_str, initial_str)
                 messagebox.showinfo("OK", "Dodano licznik.")
                 self.name_var.set("");
@@ -287,7 +538,10 @@ class App(tk.Tk):
                 self.initial_reading_var.set("")
                 self.refresh_all()
             except Exception as e:
-                messagebox.showerror("Błąd", f"Wystąpił błąd: {str(e)}")
+                error_msg = str(e)
+                if "Failed to add meter: " in error_msg:
+                    error_msg = error_msg.replace("Failed to add meter: ", "")
+                messagebox.showerror("Błąd", error_msg)
 
         btn_frame = ttk.Frame(frm)
         btn_frame.pack(padx=pad, pady=(8, pad))
@@ -337,11 +591,11 @@ class App(tk.Tk):
             kind = m["kind"]
             if m.get("tariff") is not None:
                 if kind == "prąd":
-                    tariff_text = f'{float(m["tariff"]):.3f} zł/kWh'
+                    tariff_text = f'{float(m["tariff"]):.2f} zł/kWh'
                 elif kind in ("woda", "gaz"):
-                    tariff_text = f'{float(m["tariff"]):.3f} zł/m³'
+                    tariff_text = f'{float(m["tariff"]):.2f} zł/m³'
                 else:
-                    tariff_text = f'{float(m["tariff"]):.3f}'
+                    tariff_text = f'{float(m["tariff"]):.2f}'
             else:
                 tariff_text = ""
 
@@ -414,7 +668,7 @@ class App(tk.Tk):
         try:
             val = float(self.read_value.get().replace(",", "."))
         except ValueError:
-            messagebox.showerror("Błąd", "Niepoprawna wartość odczytu.")
+            messagebox.showerror("Błąd", "Proszę wpisać liczbę w wartość odczytu")
             return
         ts_str = self.read_ts.get().strip()
         try:
@@ -436,11 +690,17 @@ class App(tk.Tk):
             messagebox.showerror("Błąd", "Nowy odczyt jest mniejszy od poprzedniego.")
             return
 
-        add_reading(m["id"], val, ts_str)
-        messagebox.showinfo("OK", "Odczyt zapisany.")
-        self.read_value.set("")
-        self.read_ts.set(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        self.refresh_all()
+        try:
+            add_reading(m["id"], val, ts_str)
+            messagebox.showinfo("OK", "Odczyt zapisany.")
+            self.read_value.set("")
+            self.read_ts.set(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            self.refresh_all()
+        except Exception as e:
+            error_msg = str(e)
+            if "Failed to add reading: " in error_msg:
+                error_msg = error_msg.replace("Failed to add reading: ", "")
+            messagebox.showerror("Błąd", error_msg)
 
     def build_cost(self):
         frm = self.t_cost
@@ -591,7 +851,7 @@ class App(tk.Tk):
         total_readings = len(hist) + (1 if initial is not None else 0)
 
         if total_readings < 2:
-            self._clear_cost_chart("elec")
+            self._clear_cost_chart("elec", show_message=True)
             return
 
         if getattr(self, '_cost_chart_type', 'comparison') == "comparison":
@@ -631,7 +891,7 @@ class App(tk.Tk):
         total_readings = len(hist) + (1 if initial is not None else 0)
 
         if total_readings < 2:
-            self._clear_cost_chart("water")
+            self._clear_cost_chart("water", show_message=True)
             return
 
         if getattr(self, '_cost_chart_type', 'comparison') == "comparison":
@@ -671,7 +931,7 @@ class App(tk.Tk):
         total_readings = len(hist) + (1 if initial is not None else 0)
 
         if total_readings < 2:
-            self._clear_cost_chart("gas")
+            self._clear_cost_chart("gas", show_message=True)
             return
 
         if getattr(self, '_cost_chart_type', 'comparison') == "comparison":
@@ -699,7 +959,7 @@ class App(tk.Tk):
         else:
             self.after(100, lambda m=m, hist=hist, initial=initial, tariff=tariff: self._draw_cost_history_chart("gas", m, hist, initial, tariff))
 
-    def _clear_cost_chart(self, kind):
+    def _clear_cost_chart(self, kind, show_message=False):
         if kind == "elec":
             frame = self.cost_chart_e_frame
         elif kind == "water":
@@ -708,6 +968,10 @@ class App(tk.Tk):
             frame = self.cost_chart_g_frame
         for widget in frame.winfo_children():
             widget.destroy()
+        
+        if show_message:
+            ttk.Label(frame, text="Potrzebne są co najmniej 2 odczyty do wyświetlenia wykresu.",
+                      font=('Segoe UI', 10)).pack(padx=16, pady=16)
 
     def _draw_cost_chart(self, kind, current_cost, previous_cost, chart_type):
         if kind == "elec":
@@ -719,10 +983,6 @@ class App(tk.Tk):
 
         for widget in frame.winfo_children():
             widget.destroy()
-
-        if not HAS_MATPLOTLIB:
-            ttk.Label(frame, text="Matplotlib nie jest dostępne").pack(padx=8, pady=8)
-            return
 
         frame_w = frame.winfo_width()
         frame_h = frame.winfo_height()
@@ -745,8 +1005,8 @@ class App(tk.Tk):
         if previous_cost == 0 or previous_cost < 0.01:
             labels = ['Bieżący\nokres']
             costs = [current_cost]
-            colors = ['#FF6B6B']
-            edgecolors = ['#D32F2F']
+            colors = ['#1976D2']
+            edgecolors = ['#1565C0']
             bars = ax.bar([0], costs, color=colors, edgecolor=edgecolors, linewidth=2, width=0.6)
             ax.set_xlim(-1, 1)
             ax.set_xticks([0])
@@ -754,8 +1014,8 @@ class App(tk.Tk):
         else:
             labels = ['Poprzedni\nokres', 'Bieżący\nokres']
             costs = [previous_cost, current_cost]
-            colors = ['#1976D2', '#FF6B6B']
-            edgecolors = ['#1565C0', '#D32F2F']
+            colors = ['#FF6B6B', '#1976D2']
+            edgecolors = ['#D32F2F', '#1565C0']
             bars = ax.bar(labels, costs, color=colors, edgecolor=edgecolors, linewidth=2, width=0.6)
 
         ax.set_ylabel('Koszt (zł)', fontsize=11, fontweight='bold')
@@ -796,14 +1056,11 @@ class App(tk.Tk):
         for widget in frame.winfo_children():
             widget.destroy()
 
-        if not HAS_MATPLOTLIB:
-            ttk.Label(frame, text="Matplotlib nie jest dostępne").pack(padx=8, pady=8)
-            return
-
         frame_w = frame.winfo_width()
         frame_h = frame.winfo_height()
 
         if frame_w < 200:
+            frame_w = 600
         if frame_h < 200:
             frame_h = 300
 
@@ -819,11 +1076,7 @@ class App(tk.Tk):
         costs_data = []
         labels_data = []
 
-        if initial is not None:
-            costs_data.append(0.0)
-            labels_data.append("Początkowy")
-
-        prev_value = initial if initial is not None else 0
+        prev_value = float(initial) if initial is not None else 0.0
         for i, r in enumerate(hist[-6:]):
             curr_value = float(r["value"])
             period_cost = (curr_value - prev_value) * tariff if tariff else 0
@@ -833,7 +1086,7 @@ class App(tk.Tk):
             ts_str = r["ts"]
             if len(ts_str) > 10:
                 ts_str = ts_str[:10]
-            labels_data.append(f"#{i + 1}\n{ts_str}")
+            labels_data.append(f'{period_cost:.2f}\n{ts_str}')
             prev_value = curr_value
 
         ax.plot(range(len(costs_data)), costs_data, marker='o', color='#1976D2', linewidth=2, markersize=8)
@@ -920,27 +1173,67 @@ class App(tk.Tk):
         frm = self.t_edit
         pad = 16
 
-        ttk.Label(frm, text="Liczniki do edycji:", font=('Segoe UI', 11, 'bold')).pack(anchor="w", padx=pad,
-                                                                                       pady=(pad, 8))
+        top_frame = ttk.Frame(frm)
+        top_frame.pack(fill="both", expand=True, padx=pad, pady=pad)
+
+        ttk.Label(top_frame, text="Liczniki do edycji:", font=('Segoe UI', 11, 'bold')).pack(anchor="w", pady=(0, 8))
 
         cols = ("nazwa", "rodzaj", "taryfa")
-        self.tbl_edit = ttk.Treeview(frm, columns=cols, show="headings", height=12)
+        self.tbl_edit = ttk.Treeview(top_frame, columns=cols, show="headings", height=8)
         self.tbl_edit.heading("nazwa", text="NAZWA")
         self.tbl_edit.heading("rodzaj", text="RODZAJ")
         self.tbl_edit.heading("taryfa", text="TARYFA")
         for c, w in zip(cols, (200, 100, 200)):
             self.tbl_edit.column(c, width=w, anchor="center")
 
-        scrollbar = ttk.Scrollbar(frm, orient="vertical", command=self.tbl_edit.yview)
+        scrollbar = ttk.Scrollbar(top_frame, orient="vertical", command=self.tbl_edit.yview)
         self.tbl_edit.configure(yscrollcommand=scrollbar.set)
-        self.tbl_edit.pack(side="left", fill="both", expand=True, padx=(pad, 0), pady=(0, 12))
-        scrollbar.pack(side="right", fill="y", padx=(0, pad), pady=(0, 12))
+        self.tbl_edit.pack(side="left", fill="both", expand=True, pady=(0, 12))
+        scrollbar.pack(side="right", fill="y", padx=(4, 0), pady=(0, 12))
 
-        btn_frame = ttk.Frame(frm)
-        btn_frame.pack(padx=pad, pady=(0, pad))
+        btn_frame = ttk.Frame(top_frame)
+        btn_frame.pack(pady=(0, 12))
         ttk.Button(btn_frame, text="✏️ Edytuj", command=self.edit_meter).pack(side="left", padx=4)
         ttk.Button(btn_frame, text="🗑️ Usuń", command=self.delete_selected_meter).pack(side="left", padx=4)
 
+        sep = ttk.Separator(frm, orient="horizontal")
+        sep.pack(fill="x", padx=pad, pady=8)
+
+        edit_form_frame = ttk.Frame(frm)
+        edit_form_frame.pack(fill="both", padx=pad, pady=(0, pad))
+
+        self.edit_form_visible = False
+        self.edit_form_frame = edit_form_frame
+        self._current_edited_meter = None
+
+        ttk.Label(edit_form_frame, text="Edycja licznika:", font=('Segoe UI', 10, 'bold')).pack(anchor="w", pady=(0, 12))
+
+        r1 = ttk.Frame(edit_form_frame)
+        r1.pack(fill="x", pady=6)
+        ttk.Label(r1, text="Nazwa:", width=15).pack(side="left")
+        self.edit_name_var = tk.StringVar()
+        ttk.Entry(r1, textvariable=self.edit_name_var, width=40).pack(side="left", padx=(0, 12))
+
+        r2 = ttk.Frame(edit_form_frame)
+        r2.pack(fill="x", pady=6)
+        ttk.Label(r2, text="Rodzaj:", width=15).pack(side="left")
+        self.edit_kind_var = tk.StringVar()
+        self.edit_kind_combo = ttk.Combobox(r2, textvariable=self.edit_kind_var, state="readonly",
+                                           values=["prąd", "woda", "gaz"], width=37)
+        self.edit_kind_combo.pack(side="left", padx=(0, 12))
+
+        r3 = ttk.Frame(edit_form_frame)
+        r3.pack(fill="x", pady=6)
+        ttk.Label(r3, text="Taryfa:", width=15).pack(side="left")
+        self.edit_tariff_var = tk.StringVar()
+        ttk.Entry(r3, textvariable=self.edit_tariff_var, width=40).pack(side="left", padx=(0, 12))
+
+        btn_frame2 = ttk.Frame(edit_form_frame)
+        btn_frame2.pack(pady=(12, 0))
+        ttk.Button(btn_frame2, text="Zapisz", command=self.save_edited_meter).pack(side="left", padx=4)
+        ttk.Button(btn_frame2, text="Anuluj", command=self.cancel_edit_meter).pack(side="left", padx=4)
+
+        self.hide_edit_form()
         self.refresh_edit_table()
 
     def refresh_edit_table(self):
@@ -953,15 +1246,23 @@ class App(tk.Tk):
             kind = m["kind"]
             if m.get("tariff") is not None:
                 if kind == "prąd":
-                    tariff_text = f'{float(m["tariff"]):.3f} zł/kWh'
+                    tariff_text = f'{float(m["tariff"]):.2f} zł/kWh'
                 elif kind in ("woda", "gaz"):
-                    tariff_text = f'{float(m["tariff"]):.3f} zł/m³'
+                    tariff_text = f'{float(m["tariff"]):.2f} zł/m³'
                 else:
-                    tariff_text = f'{float(m["tariff"]):.3f}'
+                    tariff_text = f'{float(m["tariff"]):.2f}'
             else:
                 tariff_text = ""
 
             self.tbl_edit.insert("", "end", values=(m["name"], m["kind"], tariff_text))
+
+    def show_edit_form(self):
+        self.edit_form_frame.pack(fill="both", padx=16, pady=(0, 16))
+        self.edit_form_visible = True
+
+    def hide_edit_form(self):
+        self.edit_form_frame.pack_forget()
+        self.edit_form_visible = False
 
     def edit_meter(self):
         sel = self.tbl_edit.selection()
@@ -972,48 +1273,45 @@ class App(tk.Tk):
         item_index = self.tbl_edit.index(sel[0])
         meter = self._meters_cache_edit[item_index]
 
-        dialog = tk.Toplevel(self)
-        dialog.title("Edytuj licznik")
-        dialog.geometry("400x250")
-        dialog.resizable(False, False)
+        self._current_edited_meter = meter
+        self.edit_name_var.set(meter["name"])
+        self.edit_kind_var.set(meter["kind"])
+        self.edit_tariff_var.set(str(meter.get("tariff") or ""))
+        self.show_edit_form()
 
-        ttk.Label(dialog, text="Nazwa:", font=('Segoe UI', 10)).grid(row=0, column=0, padx=12, pady=12, sticky="w")
-        name_var = tk.StringVar(value=meter["name"])
-        name_entry = ttk.Entry(dialog, textvariable=name_var, font=('Segoe UI', 10), width=30)
-        name_entry.grid(row=0, column=1, padx=12, pady=12)
+    def save_edited_meter(self):
+        if not self._current_edited_meter:
+            return
 
-        ttk.Label(dialog, text="Rodzaj:", font=('Segoe UI', 10)).grid(row=1, column=0, padx=12, pady=12, sticky="w")
-        kind_var = tk.StringVar(value=meter["kind"])
-        kind_combo = ttk.Combobox(dialog, textvariable=kind_var, state="readonly",
-                                  values=["prąd", "woda", "gaz"], font=('Segoe UI', 10), width=27)
-        kind_combo.grid(row=1, column=1, padx=12, pady=12)
+        try:
+            name = self.edit_name_var.get().strip()
+            kind = self.edit_kind_var.get()
+            tariff_str = self.edit_tariff_var.get().strip()
 
-        ttk.Label(dialog, text="Taryfa:", font=('Segoe UI', 10)).grid(row=2, column=0, padx=12, pady=12, sticky="w")
-        tariff_var = tk.StringVar(value=str(meter.get("tariff") or ""))
-        tariff_entry = ttk.Entry(dialog, textvariable=tariff_var, font=('Segoe UI', 10), width=30)
-        tariff_entry.grid(row=2, column=1, padx=12, pady=12)
+            if not name:
+                messagebox.showerror("Błąd", "Podaj nazwę licznika.")
+                return
 
-        def save():
-            try:
-                name = name_var.get().strip()
-                kind = kind_var.get()
-                tariff_str = tariff_var.get().strip()
+            if tariff_str and not self._is_valid_number(tariff_str):
+                messagebox.showerror("Błąd", "Proszę wpisać liczbę w taryfa")
+                return
 
-                if not name:
-                    messagebox.showerror("Błąd", "Podaj nazwę licznika.")
-                    return
+            update_meter(self._current_edited_meter["id"], name, kind, tariff_str, self._current_edited_meter.get("initial_reading"))
+            messagebox.showinfo("OK", "Licznik zaktualizowany.")
+            self.cancel_edit_meter()
+            self.refresh_all()
+        except Exception as e:
+            error_msg = str(e)
+            if "Error updating meter: " in error_msg:
+                error_msg = error_msg.replace("Error updating meter: ", "")
+            messagebox.showerror("Błąd", error_msg)
 
-                update_meter(meter["id"], name, kind, tariff_str, meter.get("initial_reading"))
-                messagebox.showinfo("OK", "Licznik zaktualizowany.")
-                dialog.destroy()
-                self.refresh_all()
-            except Exception as e:
-                messagebox.showerror("Błąd", f"Błąd: {str(e)}")
-
-        btn_frame = ttk.Frame(dialog)
-        btn_frame.grid(row=3, column=0, columnspan=2, pady=20)
-        ttk.Button(btn_frame, text="Zapisz", command=save).pack(side="left", padx=4)
-        ttk.Button(btn_frame, text="Anuluj", command=dialog.destroy).pack(side="left", padx=4)
+    def cancel_edit_meter(self):
+        self._current_edited_meter = None
+        self.edit_name_var.set("")
+        self.edit_kind_var.set("")
+        self.edit_tariff_var.set("")
+        self.hide_edit_form()
 
     def delete_selected_meter(self):
         sel = self.tbl_edit.selection()
@@ -1202,32 +1500,44 @@ class App(tk.Tk):
 
         initial = m.get("initial_reading")
         if initial is not None:
-            readings_data.append(float(initial))
-            labels_data.append("Początkowy")
+            initial_val = float(initial)
+            readings_data.append(initial_val)
+            labels_data.append(f'{initial_val:.2f}\nPoczątkowy')
 
         for i, r in enumerate(hist[-6:]):
-            readings_data.append(float(r["value"]))
+            value = float(r["value"])
+            readings_data.append(value)
             ts_str = r["ts"]
             if len(ts_str) > 10:
                 ts_str = ts_str[:10]
-            labels_data.append(f"#{i + 1}\n{ts_str}")
+            labels_data.append(f'{value:.2f}\n{ts_str}')
 
         if self._chart_type == "comparison":
-            colors_comparison = ['#1976D2', '#FF6B6B']
+            colors_comparison = ['#FF6B6B', '#1976D2']
             if len(hist) >= 1:
                 curr = float(hist[-1]["value"])
 
                 if len(hist) == 1:
                     initial_val = float(initial) if initial is not None else 0
-                    bar_labels = ['Początkowy\nodczyt', 'Aktualny\nodczyt']
-                    bar_values = [initial_val, curr]
+                    if initial_val == 0 or initial_val < 0.01:
+                        bar_labels = ['Aktualny\nodczyt']
+                        bar_values = [curr]
+                        colors_comparison = ['#1976D2']
+                        edgecolors_comp = ['#1565C0']
+                    else:
+                        bar_labels = ['Początkowy\nodczyt', 'Aktualny\nodczyt']
+                        bar_values = [initial_val, curr]
+                        colors_comparison = ['#FF6B6B', '#1976D2']
+                        edgecolors_comp = ['#D32F2F', '#1565C0']
                 else:
                     prev = float(hist[-2]["value"])
                     initial_val = prev
                     bar_labels = ['Poprzedni\nodczyt', 'Aktualny\nodczyt']
                     bar_values = [prev, curr]
+                    colors_comparison = ['#FF6B6B', '#1976D2']
+                    edgecolors_comp = ['#D32F2F', '#1565C0']
 
-                bars = ax.bar(bar_labels, bar_values, color=colors_comparison, edgecolor=['#1565C0', '#D32F2F'],
+                bars = ax.bar(bar_labels, bar_values, color=colors_comparison, edgecolor=edgecolors_comp,
                               linewidth=2)
                 ax.set_ylabel('Wartość [' + self._get_unit(m["kind"]) + ']', fontsize=11, fontweight='bold')
                 ax.set_title('Porównanie zużycia', fontsize=13, fontweight='bold', pad=20)
@@ -1235,7 +1545,7 @@ class App(tk.Tk):
 
                 max_val = max(bar_values)
                 for i, (bar, v) in enumerate(zip(bars, bar_values)):
-                    ax.text(bar.get_x() + bar.get_width() / 2., max_val * 1.05, f'{v:.3f}', ha='center', va='bottom',
+                    ax.text(bar.get_x() + bar.get_width() / 2., max_val * 1.05, f'{v:.2f}', ha='center', va='bottom',
                             fontsize=11, fontweight='bold')
         else:
             ax.plot(range(len(readings_data)), readings_data, marker='o', color='#1976D2', linewidth=2, markersize=8)
@@ -1286,5 +1596,3 @@ if __name__ == "__main__":
     app = App()
     app.mainloop()
 
-
-            frame_w = 600
