@@ -16,8 +16,8 @@ from matplotlib.figure import Figure
 
 CURRENT_USER = None
 
-ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID", "AKIA3HGZKODJZMKBTBXX")
-SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "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")
+ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID", "key")
+SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "key")
 REGION = os.getenv("AWS_REGION", "eu-north-1")
 
 dynamo = boto3.client(
